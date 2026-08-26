@@ -15,7 +15,7 @@ jobs:
     steps:
       - id: m
         run: |
-          echo "matrix=[\"a\",\"b\"]" >> "$GITHUB_OUTPUT"
+          echo "matrix=[{\"ref\":\"a\"},{\"ref\":\"b\"}]" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prep
@@ -24,4 +24,4 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
     steps:
-      - run: echo "ran with ${{ join(matrix.*, ',') }}"
+      - run: echo "ran with ref=${{ matrix.ref }}"
