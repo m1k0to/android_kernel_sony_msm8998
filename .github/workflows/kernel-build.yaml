@@ -93,10 +93,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      matrix:
-        ref:
-          - evo-13
-          - evo-13-ksu
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
