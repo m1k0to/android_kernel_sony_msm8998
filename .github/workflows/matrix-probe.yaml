@@ -15,7 +15,7 @@ jobs:
     steps:
       - id: m
         run: |
-          echo "matrix=[{\"ref\":\"a\"},{\"ref\":\"b\"}]" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"include\":[{\"ref\":\"a\"},{\"ref\":\"b\"}]}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prep
