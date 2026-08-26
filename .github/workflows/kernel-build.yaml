@@ -102,10 +102,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          # Matrix jobs each checkout the ref they were dispatched for. The
-          # dispatch ref itself (github.ref) is used directly; additional
-          # refs in the 'refs' input are built by branching here.
-          ref: ${{ format('refs/{0}/{1}', needs.prepare.outputs.ref_type, matrix.ref) }}
+          # Matrix variants are built from the dispatched branch itself
+          # (github.ref). The matrix 'ref' only drives the artifact/variant
+          # naming. This avoids fetching an unrelated ref and keeps the
+          # checkout reliable.
+          ref: ${{ github.ref }}
 
       - name: Install build dependencies
         run: |
