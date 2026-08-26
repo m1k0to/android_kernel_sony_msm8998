@@ -38,7 +38,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          # We always build the head of the branch the manual dispatch ran on.
+          # The optional 'ref' input is not used for checkout (checkout can't
+          # fetch a bare short SHA); it is only informational for the build.
+          ref: ${{ github.ref }}
 
       - name: Install build dependencies
         run: |
