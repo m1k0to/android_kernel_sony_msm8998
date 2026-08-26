@@ -99,10 +99,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          # checkout cannot fetch a bare commit SHA well; branch/tag works via
-          # refs/heads or refs/tags, so build the ref head. Exact commit is
-          # handled by an explicit checkout below if provided.
-          ref: ${{ github.event.inputs.commit || (needs.prepare.outputs.ref_type == 'tag' && format('refs/tags/{0}', matrix.ref) || format('refs/heads/{0}', matrix.ref)) }}
+          # Matrix jobs each checkout the ref they were dispatched for. The
+          # dispatch ref itself (github.ref) is used directly; additional
+          # refs in the 'refs' input are built by branching here.
+          ref: ${{ format('refs/{0}/{1}', needs.prepare.outputs.ref_type, matrix.ref) }}
 
       - name: Install build dependencies
         run: |
