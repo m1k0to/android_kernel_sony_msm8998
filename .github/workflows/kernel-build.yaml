@@ -87,25 +87,16 @@ jobs:
         run: |
           echo "ref_type=${{ github.event.inputs.ref_type }}" >> "$GITHUB_OUTPUT"
 
-  check:
-    name: Debug matrix value
-    needs: prepare
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Print matrix output
-        run: |
-          echo "matrix raw output: [${{ needs.prepare.outputs.matrix }}]"
-          echo "ref_type output: [${{ needs.prepare.outputs.ref_type }}]"
-          echo "--- try fromJSON ---"
-          echo 'MATRIX_JSON=${{ toJSON(fromJSON(needs.prepare.outputs.matrix)) }}'
-
   build:
     name: Build ["${{ matrix.ref }}"]
     needs: prepare
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+      matrix:
+        ref:
+          - evo-13
+          - evo-13-ksu
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
