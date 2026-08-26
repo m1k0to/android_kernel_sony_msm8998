@@ -1,0 +1,27 @@
+name: matrix-probe
+on:
+  workflow_dispatch:
+    inputs:
+      refs:
+        description: 'comma separated refs'
+        default: 'a,b'
+        type: string
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          echo "matrix=[\"a\",\"b\"]" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prep
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
+    steps:
+      - run: echo "ran with ${{ join(matrix.*, ',') }}"
