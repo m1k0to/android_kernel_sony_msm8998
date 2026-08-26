@@ -70,8 +70,15 @@ jobs:
             [ -n "$r" ] && ARR+=("$r")
           done
           [ ${#ARR[@]} -eq 0 ] && ARR=("evo-13")
-          # JSON array
-          J=$(printf '%s\n' "${ARR[@]}" | jq -Rn '[inputs]')
+          # Build a JSON array without jq (GitHub runner has no jq in this job).
+          J=""
+          SEP=""
+          for r in "${ARR[@]}"; do
+            esc=$(printf '%s' "$r" | sed 's/"/\\"/g')
+            J="${J}${SEP}\"${esc}\""
+            SEP=","
+          done
+          J="[${J}]"
           echo "matrix=$J" >> "$GITHUB_OUTPUT"
           echo "Matrix: $J"
       - id: meta
