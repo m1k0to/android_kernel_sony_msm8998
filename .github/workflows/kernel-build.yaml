@@ -52,11 +52,36 @@ env:
 jobs:
   # Split the comma separated refs into a matrix.
   prepare:
-    name: Emit ref type
+    name: Build build matrix
     runs-on: ubuntu-22.04
     outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
       ref_type: ${{ steps.meta.outputs.ref_type }}
     steps:
+      # This mirrors the officially documented 'fromJSON on a job output'
+      # pattern (https://docs.github.com/actions/using-jobs/using-a-matrix-for-your-jobs).
+      # A plain JSON array of refs is emitted and consumed by the build job's
+      # strategy.matrix via fromJSON(needs.prepare.outputs.matrix).
+      - id: matrix
+        name: Emit ref array
+        run: |
+          RAW="${{ github.event.inputs.refs }}"
+          RAW="${RAW//,/ }"
+          ARR=()
+          for r in $RAW; do
+            r="${r//[[:space:]]/}"
+            [ -n "$r" ] && ARR+=("$r")
+          done
+          [ ${#ARR[@]} -eq 0 ] && ARR=("evo-13")
+          J=""
+          SEP=""
+          for r in "${ARR[@]}"; do
+            esc=$(printf '%s' "$r" | sed 's/"/\\"/g')
+            J="${J}${SEP}\"${esc}\""
+            SEP=","
+          done
+          echo "matrix=[${J}]" | tee -a "$GITHUB_OUTPUT"
+          echo "Matrix=[${J}]"
       - id: meta
         name: Emit ref type
         run: |
@@ -68,10 +93,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      matrix:
-        ref:
-          - evo-13
-          - evo-13-ksu
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
