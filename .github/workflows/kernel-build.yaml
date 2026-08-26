@@ -70,12 +70,13 @@ jobs:
             [ -n "$r" ] && ARR+=("$r")
           done
           [ ${#ARR[@]} -eq 0 ] && ARR=("evo-13")
-          # Build a JSON array without jq (GitHub runner has no jq in this job).
+          # Build a JSON array of objects so the matrix exposes 'ref' to the
+          # build job via matrix.ref (a plain string array has no key).
           J=""
           SEP=""
           for r in "${ARR[@]}"; do
             esc=$(printf '%s' "$r" | sed 's/"/\\"/g')
-            J="${J}${SEP}\"${esc}\""
+            J="${J}${SEP}{\"ref\":\"${esc}\"}"
             SEP=","
           done
           J="[${J}]"
