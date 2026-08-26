@@ -131,8 +131,8 @@ jobs:
         id: variant
         run: |
           # LOCALVERSION -> used in artifact name, plus detect KSU.
-          LV=$(grep -m1 '^CONFIG_LOCALVERSION=' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig | sed 's/.*="\(.*\)"/\1/')
-          KSU=$(grep -c '^CONFIG_KSU=y' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig)
+          LV=$(grep -m1 '^CONFIG_LOCALVERSION=' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig | sed 's/.*="\(.*\)"/\1/' || true)
+          KSU=$(grep -c '^CONFIG_KSU=y' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig || true)
           if [ "$KSU" = "1" ]; then SUFFIX="-ksu"; else SUFFIX=""; fi
           echo "localversion=$LV"; echo "ksu=$KSU"
           echo "VARIANT=$LV$SUFFIX" >> "$GITHUB_ENV"
