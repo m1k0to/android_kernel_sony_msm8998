@@ -96,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+        ref: ${{ fromJSON(needs.prepare.outputs.matrix || '[]') }}
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
