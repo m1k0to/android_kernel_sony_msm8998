@@ -1,0 +1,124 @@
+# =====================================================================
+# Android Kernel Build - Sony Xperia XZ Premium (maple / G8141)
+# Platform: Qualcomm MSM8998 | Kernel: Linux 4.4.302 (branch evo-13)
+# Compiler: AOSP clang 14.0.6 (r450784d) + GNU binutils aarch64
+#
+# Produces two artifacts usable on the device:
+#   - kernel-<name>.zip  : AnyKernel3 package, flash from TWRP (it repacks
+#                          the on-device boot ramdisk, no ramdisk needed here)
+#   - Image.gz-dtb       : raw kernel+dtb image (for dd/other workflows)
+# =====================================================================
+name: Android Kernel Build (MSM8998 maple)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit/tag to build (empty = default branch)'
+        required: false
+        default: ''
+        type: string
+
+env:
+  ARCH: arm64
+  CLANG_VERSION: "14.0.6"
+  CLANG_ID: "r450784d"
+  # Source of the AOSP clang 14.0.6 prebuilt (r450784d), the same compiler
+  # used by the stock/Evolution X running image on this device.
+  CLANG_DOWNLOAD: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz"
+  ANY_KERNEL_REPO: "https://github.com/osm0sis/AnyKernel3"
+  ANY_KERNEL_BRANCH: "master"
+
+jobs:
+  build:
+    name: Build maple kernel
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates curl flex \
+            git libelf-dev libssl-dev lz4 python3 xz-utils zlib1g-dev \
+            device-tree-compiler
+          echo "deps ok"
+
+      - name: Download AOSP clang ${{ env.CLANG_VERSION }}/${{ env.CLANG_ID }}
+        run: |
+          mkdir -p toolchains/clang
+          curl -L "${{ env.CLANG_DOWNLOAD }}" -o /tmp/clang.tar.gz
+          tar xzf /tmp/clang.tar.gz -C toolchains/clang
+          # install GNU as/ld/objdump for the aarch64 linker (clang needs binutils)
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          echo "clang ready"
+          toolchains/clang/bin/clang --version | head -1 || true
+
+      - name: Test matrix clang path (set env for later steps)
+        id: toolchain
+        run: |
+          echo "CLANG_DIR=$PWD/toolchains/clang" >> "$GITHUB_ENV"
+
+      - name: Configure kernel
+        run: |
+          make \
+            O=out \
+            ARCH="${{ env.ARCH }}" \
+            CC="$PWD/toolchains/clang/bin/clang" \
+            CLANG_TRIPLE="aarch64-linux-gnu-" \
+            CROSS_COMPILE="aarch64-linux-gnu-" \
+            CROSS_COMPILE_ARM32="arm-linux-gnueabihf-" \
+            lineage-msm8998-yoshino-maple_defconfig
+          echo "--- config key bits ---"
+          grep -E "CONFIG_LOCALVERSION|CONFIG_RANDOMIZE_BASE|CONFIG_BUILD_ARM64_APPENDED" out/.config || true
+
+      - name: Build kernel (Image.gz-dtb)
+        run: |
+          make -j"$(nproc)" \
+            O=out \
+            ARCH="${{ env.ARCH }}" \
+            CC="$PWD/toolchains/clang/bin/clang" \
+            CLANG_TRIPLE="aarch64-linux-gnu-" \
+            CROSS_COMPILE="aarch64-linux-gnu-" \
+            CROSS_COMPILE_ARM32="arm-linux-gnueabihf-" \
+            Image.gz-dtb 2>&1 | tee out/build.log
+          echo "--- result ---"
+          ls -lh out/arch/arm64/boot/Image.gz-dtb
+
+      - name: Package AnyKernel3 ZIP
+        run: |
+          git clone --depth=1 "${{ env.ANY_KERNEL_REPO }}" -b "${{ env.ANY_KERNEL_BRANCH }}" AnyKernel3
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
+          cd AnyKernel3
+
+          # Adapt anykernel.sh to this device (maple; the boot block and
+          # device names must match what the bootloader expects).
+          sed -i \
+            -e 's/do\.devicecheck=1/do.devicecheck=0/' \
+            -e 's|^BLOCK=.*|BLOCK=/dev/block/bootdevice/by-name/boot;|' \
+            -e 's/device\.name1=.*/device.name1=maple/' \
+            -e 's/device\.name2=.*/device.name2=maple_dsds/' \
+            anykernel.sh
+          grep -E "^BLOCK=|do\.devicecheck|device\.name" anykernel.sh
+
+          ZIP="kernel-${{ github.sha }}.zip"
+          zip -r9 "../$ZIP" Image.gz-dtb anykernel.sh META-INF/ tools/ -x "*.git*" -x "README.md" 2>/dev/null || \
+          zip -r9 "../$ZIP" Image.gz-dtb anykernel.sh META-INF/ -x "*.git*" -x "README.md" 2>/dev/null
+          ls -lh "../$ZIP"
+          cd ..
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-maple-4.4.302
+          path: |
+            kernel-${{ github.sha }}.zip
+            out/arch/arm64/boot/Image.gz-dtb
+          if-no-files-found: error
+          retention-days: 14

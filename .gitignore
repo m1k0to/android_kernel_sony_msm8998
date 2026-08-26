@@ -10,6 +10,9 @@
 # Normal rules
 #
 .*
+!.github/
+!.github/workflows/
+!.github/workflows/kernel-build.yaml
 *.o
 *.o.*
 *.a
