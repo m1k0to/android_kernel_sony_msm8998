@@ -73,15 +73,17 @@ jobs:
             [ -n "$r" ] && ARR+=("$r")
           done
           [ ${#ARR[@]} -eq 0 ] && ARR=("evo-13")
+          # Emit the include-object form that the documented fromJSON matrix
+          # pattern requires (a bare array does not schedule the build job).
           J=""
           SEP=""
           for r in "${ARR[@]}"; do
             esc=$(printf '%s' "$r" | sed 's/"/\\"/g')
-            J="${J}${SEP}\"${esc}\""
+            J="${J}${SEP}{\"ref\":\"${esc}\"}"
             SEP=","
           done
-          echo "matrix=[${J}]" | tee -a "$GITHUB_OUTPUT"
-          echo "Matrix=[${J}]"
+          echo "matrix={\"include\":[${J}]}" | tee -a "$GITHUB_OUTPUT"
+          echo "Matrix={\"include\":[${J}]}"
       - id: meta
         name: Emit ref type
         run: |
