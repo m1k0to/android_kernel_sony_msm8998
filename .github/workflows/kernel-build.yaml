@@ -52,38 +52,11 @@ env:
 jobs:
   # Split the comma separated refs into a matrix.
   prepare:
-    name: Prepare build matrix
+    name: Emit ref type
     runs-on: ubuntu-22.04
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
       ref_type: ${{ steps.meta.outputs.ref_type }}
     steps:
-      - id: set-matrix
-        name: Build matrix
-        run: |
-          # Normalise: trim whitespace, split on commas, drop empties.
-          RAW="${{ github.event.inputs.refs }}"
-          RAW="${RAW//,/ }"
-          ARR=()
-          for r in $RAW; do
-            r="${r//[[:space:]]/}"
-            [ -n "$r" ] && ARR+=("$r")
-          done
-          [ ${#ARR[@]} -eq 0 ] && ARR=("evo-13")
-          # Emit a plain JSON array of ref strings. The build job consumes it
-          # via matrix.ref: ${{ fromJSON(needs.prepare.outputs.matrix) }} which
-          # is the officially documented way to feed one job's output into a
-          # matrix of another job.
-          J=""
-          SEP=""
-          for r in "${ARR[@]}"; do
-            esc=$(printf '%s' "$r" | sed 's/"/\\"/g')
-            J="${J}${SEP}\"${esc}\""
-            SEP=","
-          done
-          J="[${J}]"
-          echo "matrix=$J" >> "$GITHUB_OUTPUT"
-          echo "Matrix: $J"
       - id: meta
         name: Emit ref type
         run: |
@@ -96,7 +69,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: ${{ fromJSON(needs.prepare.outputs.matrix || '[]') }}
+        ref:
+          - evo-13
+          - evo-13-ksu
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
