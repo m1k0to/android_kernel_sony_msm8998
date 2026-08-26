@@ -54,9 +54,11 @@ jobs:
           mkdir -p toolchains/clang
           curl -L "${{ env.CLANG_DOWNLOAD }}" -o /tmp/clang.tar.gz
           tar xzf /tmp/clang.tar.gz -C toolchains/clang
-          # install GNU as/ld/objdump for the aarch64 linker (clang needs binutils)
+          # GNU aarch64 binutils (as/ld/objdump) for the linker, plus the
+          # arm32 cross GCC needed by the vdso32 (CONFIG_COMPAT_VDSO) build.
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
           echo "clang ready"
           toolchains/clang/bin/clang --version | head -1 || true
 
