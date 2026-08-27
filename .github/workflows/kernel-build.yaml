@@ -19,7 +19,7 @@ name: Build Sony MSM8998 Kernel + ReSukiSU
 "on":
   workflow_dispatch:
   push:
-    branches: [evo-13-oc-susfs]
+    branches: [evo-13, evo-13-oc]
 
 env:
   ARCH: arm64
@@ -61,9 +61,9 @@ jobs:
       - name: Set up ReSukiSU
         run: |
           git clone https://github.com/ReSukiSU/ReSukiSU KernelSU
-          # The Kbuild build-id wants a normal (non-shallow) git tree;
-          # drop the shallow marker so it doesn't try to fetch --unshallow.
-          rm -f KernelSU/.git/shallow
+          # Pin ReSukiSU to the exact commit used to build the shipped kernel
+          # (matches the ReSukiSU Manager installed on-device).
+          git -C KernelSU checkout 25d94debe0ec46334bd739ced1d8ee842e9539c8
           # ReSukiSU kernel lives in KernelSU/kernel: link it into the tree.
           ln -sfn ../KernelSU/kernel drivers/kernelsu
           ls -la drivers/kernelsu
