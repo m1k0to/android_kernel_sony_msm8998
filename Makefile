@@ -677,8 +677,12 @@ else
 ifdef CONFIG_PROFILE_ALL_BRANCHES
 KBUILD_CFLAGS	+= -O2
 else
-KBUILD_CFLAGS   += -O2
+KBUILD_CFLAGS	+= -O2
 endif
+endif
+
+ifdef CONFIG_CC_OPTIMIZE_FOR_O3
+KBUILD_CFLAGS	+= $(call cc-option,-O3,)
 endif
 
 ifdef CONFIG_CC_WERROR

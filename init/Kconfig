@@ -1476,6 +1476,15 @@ config CC_OPTIMIZE_FOR_SIZE
 
 endchoice
 
+config CC_OPTIMIZE_FOR_O3
+	bool "Optimize for O3"
+	depends on CC_OPTIMIZE_FOR_PERFORMANCE
+	help
+	  Pass "-O3" instead of "-O2" to the compiler. Produces faster
+	  code at the cost of a slightly larger binary and longer build
+	  time. Built through cc-option so an unsupported compiler
+	  silently falls back to -O2.
+
 config SYSCTL
 	bool
 
