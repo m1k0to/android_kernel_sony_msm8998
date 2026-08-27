@@ -1,120 +1,44 @@
 # =====================================================================
-# Kernel Multi-branch Build (Sony MSM8998)
+# Kernel Build (Sony MSM8998 maple + ReSukiSU)
 # Platform: Qualcomm MSM8998 (Sony Xperia XZ Premium / maple) | Kernel: 4.4.302
 # Compiler: AOSP clang 14.0.6 (r450784d) + GNU binutils aarch64
 #
-# Build one or more branch/tag artifacts in a single workflow run:
-#   - pick 'branch' or 'tag' via a dropdown
-#   - enter one or more refs (comma separated) to build, each gets its own
-#     matrix job; all artifacts are merged into a single release.
-# A variant is inferred from each checked-out branch's defconfig (e.g. a
-# branch that enables KernelSU automatically gets the -ksu suffix and the
-# KernelSU tree is fetched for it). This keeps the workflow generic: it
-# builds whatever branches you feed it.
+# Dedicated workflow: compiles this kernel with ReSukiSU (root) built-in.
+# ReSukiSU is a runtime dependency (gitignored, not vendored): it is cloned
+# into the tree and relinked as drivers/kernelsu. Manual hook mode is used
+# because 4.4 (non-GKI) does not support the GKI tracepoint hook.
 #
-# Outputs per ref:
-#   - kernel-<ref>-<sha>.zip : AnyKernel3 (flash from TWRP)
-#   - Image.gz-dtb           : raw kernel+dtb image (for dd)
+# Triggers: manual dispatch, or push to the kernel branch below.
+#
+# Outputs per run:
+#   - kernel-resukisu.zip : AnyKernel3 (flash from TWRP)
+#   - Image.gz-dtb        : raw kernel+dtb image (for dd)
 # =====================================================================
-name: Kernel Multi-branch Build (Sony MSM8998)
+name: Build Sony MSM8998 Kernel + ReSukiSU
 
 "on":
   workflow_dispatch:
-    inputs:
-      ref_type:
-        description: 'Type of ref to build'
-        required: true
-        default: 'branch'
-        type: choice
-        options:
-          - branch
-          - tag
-      refs:
-        description: 'Ref(s) to build, comma separated (e.g. evo-13,other-branch)'
-        required: false
-        default: 'evo-13'
-        type: string
-      commit:
-        description: 'Exact commit to build (overrides refs; leave empty to use ref head)'
-        required: false
-        default: ''
-        type: string
-      upload_release:
-        description: 'Publish a GitHub Release after build'
-        required: false
-        default: false
-        type: boolean
-      include_ksu:
-        description: 'Embed KernelSU (root) in the build'
-        required: false
-        default: false
-        type: boolean
+  push:
+    branches: [evo-13-oc-susfs]
 
 env:
   ARCH: arm64
   CLANG_VERSION: "14.0.6"
   CLANG_ID: "r450784d"
   CLANG_DOWNLOAD: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz"
+  DEFCONFIG: lineage-msm8998-yoshino-maple_defconfig
   ANY_KERNEL_REPO: "https://github.com/osm0sis/AnyKernel3"
   ANY_KERNEL_BRANCH: "master"
 
 jobs:
-  # Split the comma separated refs into a matrix.
-  prepare:
-    name: Build build matrix
-    runs-on: ubuntu-22.04
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-      ref_type: ${{ steps.meta.outputs.ref_type }}
-    steps:
-      # This mirrors the officially documented 'fromJSON on a job output'
-      # pattern (https://docs.github.com/actions/using-jobs/using-a-matrix-for-your-jobs).
-      # A plain JSON array of refs is emitted and consumed by the build job's
-      # strategy.matrix via fromJSON(needs.prepare.outputs.matrix).
-      - id: matrix
-        name: Emit ref array
-        run: |
-          RAW="${{ github.event.inputs.refs }}"
-          RAW="${RAW//,/ }"
-          ARR=()
-          for r in $RAW; do
-            r="${r//[[:space:]]/}"
-            [ -n "$r" ] && ARR+=("$r")
-          done
-          [ ${#ARR[@]} -eq 0 ] && ARR=("evo-13")
-          # Emit the include-object form that the documented fromJSON matrix
-          # pattern requires (a bare array does not schedule the build job).
-          J=""
-          SEP=""
-          for r in "${ARR[@]}"; do
-            esc=$(printf '%s' "$r" | sed 's/"/\\"/g')
-            J="${J}${SEP}{\"ref\":\"${esc}\"}"
-            SEP=","
-          done
-          echo "matrix={\"include\":[${J}]}" | tee -a "$GITHUB_OUTPUT"
-          echo "Matrix={\"include\":[${J}]}"
-      - id: meta
-        name: Emit ref type
-        run: |
-          echo "ref_type=${{ github.event.inputs.ref_type }}" >> "$GITHUB_OUTPUT"
-
   build:
-    name: Build ["${{ matrix.ref }}"]
-    needs: prepare
+    name: Build Kernel + ReSukiSU
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          # Matrix variants are built from the dispatched branch itself
-          # (github.ref). The matrix 'ref' only drives the artifact/variant
-          # naming. This avoids fetching an unrelated ref and keeps the
-          # checkout reliable.
-          ref: ${{ github.ref }}
 
       - name: Install build dependencies
         run: |
@@ -132,41 +56,20 @@ jobs:
           mkdir -p toolchains/clang
           curl -L "${{ env.CLANG_DOWNLOAD }}" -o /tmp/clang.tar.gz
           tar xzf /tmp/clang.tar.gz -C toolchains/clang
-          echo "clang ready"
           toolchains/clang/bin/clang --version | head -1 || true
 
-      - name: Detect variant
-        id: variant
+      - name: Set up ReSukiSU
         run: |
-          # LOCALVERSION is used in the artifact name. Whether KernelSU is
-          # embedded is chosen via the 'include_ksu' input (runtime option),
-          # NOT by the branch: a branch only encodes OC vs non-OC. This keeps
-          # the workflow generic across arbitrary branches.
-          LV=$(grep -m1 '^CONFIG_LOCALVERSION=' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig | sed 's/.*="\(.*\)"/\1/' || true)
-          KSU_INPUT="${{ github.event.inputs.include_ksu }}"
-          echo "include_ksu=$KSU_INPUT"
-          if [ "$KSU_INPUT" = "true" ]; then
-            echo "KSU=1" >> "$GITHUB_OUTPUT"
-            echo "suffix=-ksu" >> "$GITHUB_ENV"
-            echo "VARIANT=${LV}-ksu" >> "$GITHUB_ENV"
-          else
-            echo "KSU=0" >> "$GITHUB_OUTPUT"
-            echo "suffix=" >> "$GITHUB_ENV"
-            echo "VARIANT=${LV}" >> "$GITHUB_ENV"
-          fi
-
-      - name: Fetch optional variant deps (KernelSU)
-        if: steps.variant.outputs.KSU == '1'
-        run: |
-          # KernelSU is gitignored, not vendored (the branch only encodes OC).
-          # When the include_ksu input is set, fetch v0.9.5 (the last version
-          # supporting non-GKI 4.4 kernels) and relink drivers/kernelsu ->
-          # KernelSU/kernel plus re-wire Makefile/Kconfig (idempotently).
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" -o /tmp/ksu-setup.sh
-          bash /tmp/ksu-setup.sh v0.9.5
+          git clone https://github.com/ReSukiSU/ReSukiSU KernelSU
+          # The Kbuild build-id wants a normal (non-shallow) git tree;
+          # drop the shallow marker so it doesn't try to fetch --unshallow.
+          rm -f KernelSU/.git/shallow
+          # ReSukiSU kernel lives in KernelSU/kernel: link it into the tree.
+          ln -sfn ../KernelSU/kernel drivers/kernelsu
           ls -la drivers/kernelsu
+          test -e "$(realpath drivers/kernelsu)/../.git" && echo "ReSukiSU git OK"
 
-      - name: Configure kernel
+      - name: Configure kernel (${{ env.DEFCONFIG }} + ReSukiSU)
         run: |
           make \
             O=out \
@@ -178,16 +81,13 @@ jobs:
             CLANG_TRIPLE="aarch64-linux-gnu-" \
             CROSS_COMPILE="aarch64-linux-gnu-" \
             CROSS_COMPILE_ARM32="arm-linux-gnueabihf-" \
-            lineage-msm8998-yoshino-maple_defconfig
-          # KernelSU is a runtime (input) choice now, not part of the branch's
-          # defconfig. Enable it here when include_ksu was requested so the
-          # out-of-tree driver is actually compiled in.
-          if [ "${{ steps.variant.outputs.KSU }}" = "1" ]; then
-            scripts/config --file out/.config -e CONFIG_KSU
-            make O=out ARCH="${{ env.ARCH }}" olddefconfig
-          fi
+            "${{ env.DEFCONFIG }}"
+          # Enable ReSukiSU. Manual hook is required for non-GKI 4.4 (no GKI
+          # tracepoints); CONFIG_KALLSYMS_ALL is already set in the defconfig.
+          scripts/config --file out/.config -e CONFIG_KSU -e CONFIG_KSU_MANUAL_HOOK
+          make O=out ARCH="${{ env.ARCH }}" olddefconfig
           echo "--- config key bits ---"
-          grep -E "CONFIG_LOCALVERSION|CONFIG_RANDOMIZE_BASE|CONFIG_KSU|CONFIG_BUILD_ARM64_APPENDED" out/.config || true
+          grep -E "CONFIG_LOCALVERSION|CONFIG_KSU|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL|CONFIG_THREAD_INFO_IN_TASK" out/.config
 
       - name: Build kernel (Image.gz-dtb)
         run: |
@@ -216,60 +116,17 @@ jobs:
             -e 's/device\.name2=.*/device.name2=maple_dsds/' \
             anykernel.sh
           grep -E "^BLOCK=|do\.devicecheck|device\.name[12]" anykernel.sh
-          # per-ref artifact name so multiple refs don't collide in the release
-          SAFE=$(echo "${{ matrix.ref }}" | tr '/' '_')
-          ZIP="kernel-${SAFE}-${VARIANT}-${{ github.sha }}.zip"
-          zip -r9 "../$ZIP" Image.gz-dtb anykernel.sh META-INF/ tools/ -x "*.git*" -x "README.md" 2>/dev/null || \
-          zip -r9 "../$ZIP" Image.gz-dtb anykernel.sh META-INF/ -x "*.git*" -x "README.md" 2>/dev/null
-          ls -lh "../$ZIP"
+          zip -r9 "../kernel-resukisu.zip" Image.gz-dtb anykernel.sh META-INF/ tools/ -x "*.git*" -x "README.md" 2>/dev/null || \
+          zip -r9 "../kernel-resukisu.zip" Image.gz-dtb anykernel.sh META-INF/ -x "*.git*" -x "README.md" 2>/dev/null
+          ls -lh "../kernel-resukisu.zip"
           cd ..
-          echo "SAFE=$SAFE" >> "$GITHUB_ENV"
-          echo "ARTIFACT_NAME=$ZIP" >> "$GITHUB_ENV"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ env.SAFE }}
+          name: kernel-resukisu
           path: |
-            kernel-${{ env.SAFE }}-${{ env.VARIANT }}-${{ github.sha }}.zip
+            kernel-resukisu.zip
             out/arch/arm64/boot/Image.gz-dtb
           if-no-files-found: error
           retention-days: 14
-
-  # Merge all matrix artifacts into one release.
-  release:
-    name: Publish GitHub Release
-    runs-on: ubuntu-22.04
-    needs: build
-    if: ${{ github.event.inputs.upload_release == 'true' }}
-    permissions:
-      contents: write
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: kernel-*
-          merge-multiple: true
-      - name: List artifacts
-        run: |
-          echo "=== artifacts ==="
-          ls -lh *.zip 2>/dev/null || echo "no zips"
-          ls -lh Image.gz-dtb 2>/dev/null || echo "no Image.gz-dtb (skipped)"
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: kernel-${{ needs.prepare.outputs.ref_type }}-${{ github.run_number }}
-          name: "Kernel ${{ needs.prepare.outputs.ref_type }} build #${{ github.run_number }}"
-          body: |
-            ## Android Kernel for Sony Xperia XZ Premium (maple)
-
-            Built from:
-            - refs: `${{ github.event.inputs.refs }}`
-            - commit: `${{ github.sha }}`
-            - compiler: AOSP clang ${{ env.CLANG_VERSION }} (${{ env.CLANG_ID }})
-
-            Flash the matching `kernel-*.zip` via TWRP, or `dd` the `Image.gz-dtb`.
-          files: |
-            *.zip
-          draft: false
-          prerelease: true
