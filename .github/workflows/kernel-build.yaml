@@ -1,18 +1,22 @@
 # =====================================================================
-# Android Kernel Build - Sony Xperia XZ Premium (maple / G8141)
-# Platform: Qualcomm MSM8998 | Kernel: Linux 4.4.302
+# Kernel Multi-branch Build (Sony MSM8998)
+# Platform: Qualcomm MSM8998 (Sony Xperia XZ Premium / maple) | Kernel: 4.4.302
 # Compiler: AOSP clang 14.0.6 (r450784d) + GNU binutils aarch64
 #
-# Multi-branch / multi-tag build:
+# Build one or more branch/tag artifacts in a single workflow run:
 #   - pick 'branch' or 'tag' via a dropdown
 #   - enter one or more refs (comma separated) to build, each gets its own
 #     matrix job; all artifacts are merged into a single release.
+# A variant is inferred from each checked-out branch's defconfig (e.g. a
+# branch that enables KernelSU automatically gets the -ksu suffix and the
+# KernelSU tree is fetched for it). This keeps the workflow generic: it
+# builds whatever branches you feed it.
 #
 # Outputs per ref:
 #   - kernel-<ref>-<sha>.zip : AnyKernel3 (flash from TWRP)
 #   - Image.gz-dtb           : raw kernel+dtb image (for dd)
 # =====================================================================
-name: Android Kernel Build (MSM8998 maple)
+name: Kernel Multi-branch Build (Sony MSM8998)
 
 "on":
   workflow_dispatch:
@@ -26,7 +30,7 @@ name: Android Kernel Build (MSM8998 maple)
           - branch
           - tag
       refs:
-        description: 'Ref(s) to build, comma separated (e.g. evo-13,evo-13-ksu)'
+        description: 'Ref(s) to build, comma separated (e.g. evo-13,other-branch)'
         required: false
         default: 'evo-13'
         type: string
@@ -126,23 +130,26 @@ jobs:
           echo "clang ready"
           toolchains/clang/bin/clang --version | head -1 || true
 
-      - name: Detect variant name and KSU from defconfig
+      - name: Detect variant from defconfig
         id: variant
         run: |
-          # LOCALVERSION -> used in artifact name, plus detect KSU.
+          # LOCALVERSION is used in the artifact name. A variant is inferred
+          # from the branch's defconfig (here: whether KernelSU is enabled),
+          # so the workflow stays generic across arbitrary branches.
           LV=$(grep -m1 '^CONFIG_LOCALVERSION=' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig | sed 's/.*="\(.*\)"/\1/' || true)
           KSU=$(grep -c '^CONFIG_KSU=y' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig || true)
           if [ "$KSU" = "1" ]; then SUFFIX="-ksu"; else SUFFIX=""; fi
           echo "localversion=$LV"; echo "ksu=$KSU"
           echo "VARIANT=$LV$SUFFIX" >> "$GITHUB_ENV"
           echo "suffix=$SUFFIX" >> "$GITHUB_ENV"
-          echo "ksu_enabled=$KSU" >> "$GITHUB_OUTPUT"
+          echo "variant_features=$KSU" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch KernelSU (non-GKI variant)
-        if: steps.variant.outputs.ksu_enabled == '1'
+      - name: Fetch optional variant deps (KernelSU)
+        if: steps.variant.outputs.variant_features == '1'
         run: |
-          # KernelSU source is gitignored (not vendored). Fetch v0.9.5 (the
-          # last version that supports non-GKI 4.4 kernels) and relink
+          # Some branches add out-of-tree components (KernelSU is gitignored,
+          # not vendored). When the branch enables KernelSU, fetch v0.9.5 (the
+          # last version supporting non-GKI 4.4 kernels) and relink
           # drivers/kernelsu -> KernelSU/kernel, plus re-wire Makefile/Kconfig
           # (idempotently) so the build picks it up.
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" -o /tmp/ksu-setup.sh
