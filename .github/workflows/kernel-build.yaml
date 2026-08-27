@@ -136,6 +136,18 @@ jobs:
           echo "localversion=$LV"; echo "ksu=$KSU"
           echo "VARIANT=$LV$SUFFIX" >> "$GITHUB_ENV"
           echo "suffix=$SUFFIX" >> "$GITHUB_ENV"
+          echo "ksu_enabled=$KSU" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch KernelSU (non-GKI variant)
+        if: steps.variant.outputs.ksu_enabled == '1'
+        run: |
+          # KernelSU source is gitignored (not vendored). Fetch v0.9.5 (the
+          # last version that supports non-GKI 4.4 kernels) and relink
+          # drivers/kernelsu -> KernelSU/kernel, plus re-wire Makefile/Kconfig
+          # (idempotently) so the build picks it up.
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" -o /tmp/ksu-setup.sh
+          bash /tmp/ksu-setup.sh v0.9.5
+          ls -la drivers/kernelsu
 
       - name: Configure kernel
         run: |
