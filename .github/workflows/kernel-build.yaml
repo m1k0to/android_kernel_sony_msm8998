@@ -44,6 +44,11 @@ name: Kernel Multi-branch Build (Sony MSM8998)
         required: false
         default: false
         type: boolean
+      include_ksu:
+        description: 'Embed KernelSU (root) in the build'
+        required: false
+        default: false
+        type: boolean
 
 env:
   ARCH: arm64
@@ -130,28 +135,33 @@ jobs:
           echo "clang ready"
           toolchains/clang/bin/clang --version | head -1 || true
 
-      - name: Detect variant from defconfig
+      - name: Detect variant
         id: variant
         run: |
-          # LOCALVERSION is used in the artifact name. A variant is inferred
-          # from the branch's defconfig (here: whether KernelSU is enabled),
-          # so the workflow stays generic across arbitrary branches.
+          # LOCALVERSION is used in the artifact name. Whether KernelSU is
+          # embedded is chosen via the 'include_ksu' input (runtime option),
+          # NOT by the branch: a branch only encodes OC vs non-OC. This keeps
+          # the workflow generic across arbitrary branches.
           LV=$(grep -m1 '^CONFIG_LOCALVERSION=' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig | sed 's/.*="\(.*\)"/\1/' || true)
-          KSU=$(grep -c '^CONFIG_KSU=y' arch/arm64/configs/lineage-msm8998-yoshino-maple_defconfig || true)
-          if [ "$KSU" = "1" ]; then SUFFIX="-ksu"; else SUFFIX=""; fi
-          echo "localversion=$LV"; echo "ksu=$KSU"
-          echo "VARIANT=$LV$SUFFIX" >> "$GITHUB_ENV"
-          echo "suffix=$SUFFIX" >> "$GITHUB_ENV"
-          echo "variant_features=$KSU" >> "$GITHUB_OUTPUT"
+          KSU_INPUT="${{ github.event.inputs.include_ksu }}"
+          echo "include_ksu=$KSU_INPUT"
+          if [ "$KSU_INPUT" = "true" ]; then
+            echo "KSU=1" >> "$GITHUB_OUTPUT"
+            echo "suffix=-ksu" >> "$GITHUB_ENV"
+            echo "VARIANT=${LV}-ksu" >> "$GITHUB_ENV"
+          else
+            echo "KSU=0" >> "$GITHUB_OUTPUT"
+            echo "suffix=" >> "$GITHUB_ENV"
+            echo "VARIANT=${LV}" >> "$GITHUB_ENV"
+          fi
 
       - name: Fetch optional variant deps (KernelSU)
-        if: steps.variant.outputs.variant_features == '1'
+        if: steps.variant.outputs.KSU == '1'
         run: |
-          # Some branches add out-of-tree components (KernelSU is gitignored,
-          # not vendored). When the branch enables KernelSU, fetch v0.9.5 (the
-          # last version supporting non-GKI 4.4 kernels) and relink
-          # drivers/kernelsu -> KernelSU/kernel, plus re-wire Makefile/Kconfig
-          # (idempotently) so the build picks it up.
+          # KernelSU is gitignored, not vendored (the branch only encodes OC).
+          # When the include_ksu input is set, fetch v0.9.5 (the last version
+          # supporting non-GKI 4.4 kernels) and relink drivers/kernelsu ->
+          # KernelSU/kernel plus re-wire Makefile/Kconfig (idempotently).
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" -o /tmp/ksu-setup.sh
           bash /tmp/ksu-setup.sh v0.9.5
           ls -la drivers/kernelsu
@@ -169,6 +179,13 @@ jobs:
             CROSS_COMPILE="aarch64-linux-gnu-" \
             CROSS_COMPILE_ARM32="arm-linux-gnueabihf-" \
             lineage-msm8998-yoshino-maple_defconfig
+          # KernelSU is a runtime (input) choice now, not part of the branch's
+          # defconfig. Enable it here when include_ksu was requested so the
+          # out-of-tree driver is actually compiled in.
+          if [ "${{ steps.variant.outputs.KSU }}" = "1" ]; then
+            scripts/config --file out/.config -e CONFIG_KSU
+            make O=out ARCH="${{ env.ARCH }}" olddefconfig
+          fi
           echo "--- config key bits ---"
           grep -E "CONFIG_LOCALVERSION|CONFIG_RANDOMIZE_BASE|CONFIG_KSU|CONFIG_BUILD_ARM64_APPENDED" out/.config || true
 
