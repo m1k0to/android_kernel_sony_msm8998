@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/jiffies.h>
 #include <linux/fb.h>
 
 #define MAPLE_IOSCHED_PATCHLEVEL	(8)
@@ -82,21 +83,21 @@ maple_add_request(struct request_queue *q, struct request *rq)
 	struct maple_data *mdata = maple_get_data(q);
 	const int sync = rq_is_sync(rq);
 	const int dir = rq_data_dir(rq);
+	unsigned long expire = mdata->fifo_expire[sync][dir];
+	unsigned int multiple;
 
-	/* increase expiration when device is asleep */
-	unsigned int fifo_expire_suspended = mdata->fifo_expire[sync][dir] * sleep_latency_multiple;
-
-	/*
-	 * Add request to the proper fifo list and set its
-	 * expire time.
-	 */
-	if (mdata->display_on && mdata->fifo_expire[sync][dir]) {
-		rq->fifo_time = jiffies + mdata->fifo_expire[sync][dir];
-		list_add_tail(&rq->queuelist, &mdata->fifo_list[sync][dir]);
-	} else if (!mdata->display_on && fifo_expire_suspended) {
-		rq->fifo_time = jiffies + fifo_expire_suspended;
-		list_add_tail(&rq->queuelist, &mdata->fifo_list[sync][dir]);
+	/* Bound suspended expiration for safe jiffies comparisons. */
+	if (!mdata->display_on) {
+		multiple = mdata->sleep_latency_multiple;
+		if (expire > MAX_JIFFY_OFFSET / multiple)
+			expire = MAX_JIFFY_OFFSET;
+		else
+			expire *= multiple;
 	}
+
+	/* Always enqueue; zero expiration is an immediate deadline. */
+	rq->fifo_time = jiffies + expire;
+	list_add_tail(&rq->queuelist, &mdata->fifo_list[sync][dir]);
 }
 
 static struct request *
@@ -130,27 +131,26 @@ maple_choose_expired_request(struct maple_data *mdata)
 	mdata->batched = 0;
 
 	/*
-	 * Check expired requests.
-	 * Asynchronous requests have priority over synchronous.
-	 * Read requests have priority over write.
+	 * Prefer reads; within each direction, choose the earlier deadline.
+	 * Asynchronous requests retain priority when deadlines are equal.
 	 */
-	if (rq_async_read && rq_sync_read) {
-		if (time_after(rq_sync_read->fifo_time, rq_async_read->fifo_time))
-			return rq_async_read;
-	} else if (rq_async_read) {
+	if (rq_async_read && rq_sync_read)
+		return time_before(rq_sync_read->fifo_time,
+				   rq_async_read->fifo_time) ?
+			rq_sync_read : rq_async_read;
+	if (rq_async_read)
 		return rq_async_read;
-	} else if (rq_sync_read) {
+	if (rq_sync_read)
 		return rq_sync_read;
-	}
 
-	if (rq_async_write && rq_sync_write) {
-		if (time_after(rq_sync_write->fifo_time, rq_async_write->fifo_time))
-			return rq_async_write;
-	} else if (rq_async_write) {
+	if (rq_async_write && rq_sync_write)
+		return time_before(rq_sync_write->fifo_time,
+				   rq_async_write->fifo_time) ?
+			rq_sync_write : rq_async_write;
+	if (rq_async_write)
 		return rq_async_write;
-	} else if (rq_sync_write) {
+	if (rq_sync_write)
 		return rq_sync_write;
-	}
 
 	return NULL;
 }
@@ -293,21 +293,19 @@ static int maple_init_queue(struct request_queue *q, struct elevator_type *e)
 {
 	struct maple_data *mdata;
 	struct elevator_queue *eq;
+	int ret;
 
 	eq = elevator_alloc(q, e);
 	if (!eq)
 		return -ENOMEM;
 
 	/* Allocate structure */
-	mdata = kmalloc_node(sizeof(*mdata), GFP_KERNEL, q->node);
+	mdata = kzalloc_node(sizeof(*mdata), GFP_KERNEL, q->node);
 	if (!mdata) {
 		kobject_put(&eq->kobj);
 		return -ENOMEM;
 	}
 	eq->elevator_data = mdata;
-
-	mdata->fb_notifier.notifier_call = fb_notifier_callback;
-	fb_register_client(&mdata->fb_notifier);
 
 	/* Initialize fifo lists */
 	INIT_LIST_HEAD(&mdata->fifo_list[SYNC][READ]);
@@ -317,6 +315,8 @@ static int maple_init_queue(struct request_queue *q, struct elevator_type *e)
 
 	/* Initialize data */
 	mdata->batched = 0;
+	mdata->starved = 0;
+	mdata->display_on = true;
 	mdata->fifo_expire[SYNC][READ] = sync_read_expire;
 	mdata->fifo_expire[SYNC][WRITE] = sync_write_expire;
 	mdata->fifo_expire[ASYNC][READ] = async_read_expire;
@@ -324,6 +324,14 @@ static int maple_init_queue(struct request_queue *q, struct elevator_type *e)
 	mdata->fifo_batch = fifo_batch;
 	mdata->writes_starved = writes_starved;
 	mdata->sleep_latency_multiple = sleep_latency_multiple;
+
+	mdata->fb_notifier.notifier_call = fb_notifier_callback;
+	ret = fb_register_client(&mdata->fb_notifier);
+	if (ret) {
+		kfree(mdata);
+		kobject_put(&eq->kobj);
+		return ret;
+	}
 
 	spin_lock_irq(q->queue_lock);
 	q->elevator = eq;
@@ -388,6 +396,8 @@ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	
 	struct maple_data *mdata = e->elevator_data;			\
 	int __data;							\
 	int ret = maple_var_store(&__data, (page), count);		\
+	if (ret < 0)						\
+		return ret;					\
 	if (__data < (MIN))						\
 		__data = (MIN);						\
 	else if (__data > (MAX))					\

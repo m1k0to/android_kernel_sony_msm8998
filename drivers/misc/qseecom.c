@@ -1707,6 +1707,8 @@ static int __qseecom_enable_clk_scale_up(struct qseecom_dev_handle *data)
 static int qseecom_set_client_mem_param(struct qseecom_dev_handle *data,
 						void __user *argp)
 {
+	struct ion_handle *ihandle;
+	u8 *sb_virt;
 	ion_phys_addr_t pa;
 	int32_t ret;
 	struct qseecom_set_sb_mem_param_req req;
@@ -1726,38 +1728,52 @@ static int qseecom_set_client_mem_param(struct qseecom_dev_handle *data,
 			req.sb_len))
 		return -EFAULT;
 
+	/* A send may drop app_access_lock while waiting for a listener. */
+	if (atomic_read(&data->ioctl_count) > 1)
+		return -EBUSY;
+
 	/* Get the handle of the shared fd */
-	data->client.ihandle = ion_import_dma_buf(qseecom.ion_clnt,
-						req.ifd_data_fd);
-	if (IS_ERR_OR_NULL(data->client.ihandle)) {
+	ihandle = ion_import_dma_buf(qseecom.ion_clnt, req.ifd_data_fd);
+	if (IS_ERR_OR_NULL(ihandle)) {
 		pr_err("Ion client could not retrieve the handle\n");
 		return -ENOMEM;
 	}
 	/* Get the physical address of the ION BUF */
-	ret = ion_phys(qseecom.ion_clnt, data->client.ihandle, &pa, &len);
+	ret = ion_phys(qseecom.ion_clnt, ihandle, &pa, &len);
 	if (ret) {
-
 		pr_err("Cannot get phys_addr for the Ion Client, ret = %d\n",
 			ret);
-		return ret;
+		goto err_free;
 	}
 
 	if (len < req.sb_len) {
 		pr_err("Requested length (0x%x) is > allocated (%zu)\n",
 			req.sb_len, len);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err_free;
 	}
 	/* Populate the structure for sending scm call to load image */
-	data->client.sb_virt = (char *) ion_map_kernel(qseecom.ion_clnt,
-							data->client.ihandle);
-	if (IS_ERR_OR_NULL(data->client.sb_virt)) {
+	sb_virt = (u8 *)ion_map_kernel(qseecom.ion_clnt, ihandle);
+	if (IS_ERR_OR_NULL(sb_virt)) {
 		pr_err("ION memory mapping for client shared buf failed\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_free;
 	}
+
+	if (!IS_ERR_OR_NULL(data->client.ihandle)) {
+		ion_unmap_kernel(qseecom.ion_clnt, data->client.ihandle);
+		ion_free(qseecom.ion_clnt, data->client.ihandle);
+	}
+	data->client.ihandle = ihandle;
+	data->client.sb_virt = sb_virt;
 	data->client.sb_phys = (phys_addr_t)pa;
 	data->client.sb_length = req.sb_len;
 	data->client.user_virt_sb_base = (uintptr_t)req.virt_sb_base;
 	return 0;
+
+err_free:
+	ion_free(qseecom.ion_clnt, ihandle);
+	return ret;
 }
 
 static int __qseecom_listener_has_sent_rsp(struct qseecom_dev_handle *data,

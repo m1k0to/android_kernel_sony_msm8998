@@ -67,6 +67,10 @@ struct hardidletimer_tg {
 };
 
 static LIST_HEAD(hardidletimer_tg_list);
+/* Lock order: lifecycle_mutex, then list_mutex.
+ * Sysfs show takes only list_mutex.
+ */
+static DEFINE_MUTEX(lifecycle_mutex);
 static DEFINE_MUTEX(list_mutex);
 
 static struct kobject *hardidletimer_tg_kobj;
@@ -118,6 +122,7 @@ static ssize_t hardidletimer_tg_show(struct kobject *kobj,
 {
 	struct hardidletimer_tg *timer;
 	ktime_t expires;
+	bool send_nl_msg = false;
 	struct timespec ktimespec;
 
 	memset(&ktimespec, 0, sizeof(struct timespec));
@@ -127,6 +132,7 @@ static ssize_t hardidletimer_tg_show(struct kobject *kobj,
 	if (timer) {
 		expires = alarm_expires_remaining(&timer->alarm);
 		ktimespec = ktime_to_timespec(expires);
+		send_nl_msg = timer->send_nl_msg;
 	}
 
 	mutex_unlock(&list_mutex);
@@ -134,7 +140,7 @@ static ssize_t hardidletimer_tg_show(struct kobject *kobj,
 	if (ktimespec.tv_sec >= 0)
 		return snprintf(buf, PAGE_SIZE, "%ld\n", ktimespec.tv_sec);
 
-	if ((timer) && (timer->send_nl_msg))
+	if (send_nl_msg)
 		return snprintf(buf, PAGE_SIZE, "0 %ld\n", ktimespec.tv_sec);
 	else
 		return snprintf(buf, PAGE_SIZE, "0\n");
@@ -168,12 +174,13 @@ static int hardidletimer_tg_create(struct hardidletimer_tg_info *info)
 	int ret;
 	ktime_t tout;
 
-	info->timer = kmalloc(sizeof(*info->timer), GFP_KERNEL);
+	info->timer = kzalloc(sizeof(*info->timer), GFP_KERNEL);
 	if (!info->timer) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
+	sysfs_attr_init(&info->timer->attr.attr);
 	info->timer->attr.attr.name = kstrdup(info->label, GFP_KERNEL);
 	if (!info->timer->attr.attr.name) {
 		ret = -ENOMEM;
@@ -182,26 +189,26 @@ static int hardidletimer_tg_create(struct hardidletimer_tg_info *info)
 	info->timer->attr.attr.mode = S_IRUGO;
 	info->timer->attr.show = hardidletimer_tg_show;
 
-	ret = sysfs_create_file(hardidletimer_tg_kobj, &info->timer->attr.attr);
-	if (ret < 0) {
-		pr_debug("couldn't add file to sysfs");
-		goto out_free_attr;
-	}
-	/*  notify userspace  */
-	kobject_uevent(hardidletimer_tg_kobj, KOBJ_ADD);
-
-	list_add(&info->timer->entry, &hardidletimer_tg_list);
-
 	alarm_init(&info->timer->alarm, ALARM_BOOTTIME,
 				hardidletimer_tg_alarmproc);
 	info->timer->alarm.data = info->timer;
 	info->timer->refcnt = 1;
 	info->timer->send_nl_msg = (info->send_nl_msg == 0) ? false : true;
 	info->timer->active = true;
+	INIT_WORK(&info->timer->work, hardidletimer_tg_work);
+
+	ret = sysfs_create_file(hardidletimer_tg_kobj, &info->timer->attr.attr);
+	if (ret < 0)
+		goto out_free_attr;
+
+	mutex_lock(&list_mutex);
 	tout = ktime_set(info->timeout, 0);
 	alarm_start_relative(&info->timer->alarm, tout);
 
-	INIT_WORK(&info->timer->work, hardidletimer_tg_work);
+	list_add(&info->timer->entry, &hardidletimer_tg_list);
+	mutex_unlock(&list_mutex);
+	/* Notify only after the timer is fully published. */
+	kobject_uevent(hardidletimer_tg_kobj, KOBJ_ADD);
 
 	return 0;
 
@@ -241,7 +248,7 @@ static unsigned int hardidletimer_tg_target(struct sk_buff *skb,
 static int hardidletimer_tg_checkentry(const struct xt_tgchk_param *par)
 {
 	struct hardidletimer_tg_info *info = par->targinfo;
-	int ret;
+	int ret = 0;
 	ktime_t tout;
 
 	pr_debug("checkentry targinfo %s\n", info->label);
@@ -258,6 +265,7 @@ static int hardidletimer_tg_checkentry(const struct xt_tgchk_param *par)
 		return -EINVAL;
 	}
 
+	mutex_lock(&lifecycle_mutex);
 	mutex_lock(&list_mutex);
 
 	info->timer = __hardidletimer_tg_find_by_label(info->label);
@@ -274,18 +282,14 @@ static int hardidletimer_tg_checkentry(const struct xt_tgchk_param *par)
 
 		pr_debug("increased refcnt of timer %s to %u\n",
 			 info->label, info->timer->refcnt);
-	} else {
-		ret = hardidletimer_tg_create(info);
-		if (ret < 0) {
-			pr_debug("failed to create timer\n");
-			mutex_unlock(&list_mutex);
-			return ret;
-		}
 	}
-
 	mutex_unlock(&list_mutex);
 
-	return 0;
+	if (!info->timer)
+		ret = hardidletimer_tg_create(info);
+
+	mutex_unlock(&lifecycle_mutex);
+	return ret;
 }
 
 static void hardidletimer_tg_destroy(const struct xt_tgdtor_param *par)
@@ -294,24 +298,27 @@ static void hardidletimer_tg_destroy(const struct xt_tgdtor_param *par)
 
 	pr_debug("destroy targinfo %s\n", info->label);
 
+	mutex_lock(&lifecycle_mutex);
 	mutex_lock(&list_mutex);
 
 	if (--info->timer->refcnt == 0) {
 		pr_debug("deleting timer %s\n", info->label);
 
 		list_del(&info->timer->entry);
-		alarm_cancel(&info->timer->alarm);
-		cancel_work_sync(&info->timer->work);
+		mutex_unlock(&list_mutex);
 		sysfs_remove_file(hardidletimer_tg_kobj,
 				&info->timer->attr.attr);
+		alarm_cancel(&info->timer->alarm);
+		cancel_work_sync(&info->timer->work);
 		kfree(info->timer->attr.attr.name);
 		kfree(info->timer);
 	} else {
 		pr_debug("decreased refcnt of timer %s to %u\n",
 		info->label, info->timer->refcnt);
+		mutex_unlock(&list_mutex);
 	}
 
-	mutex_unlock(&list_mutex);
+	mutex_unlock(&lifecycle_mutex);
 }
 
 static struct xt_target hardidletimer_tg __read_mostly = {

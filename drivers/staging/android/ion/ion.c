@@ -1516,12 +1516,6 @@ bool ion_dma_buf_is_secure(struct dma_buf *dmabuf)
 }
 EXPORT_SYMBOL(ion_dma_buf_is_secure);
 
-static int ion_share_dma_buf_fd_nolock(struct ion_client *client,
-				       struct ion_handle *handle)
-{
-	return __ion_share_dma_buf_fd(client, handle, false);
-}
-
 static struct ion_handle *__ion_import_dma_buf(struct ion_client *client,
 					       int fd, bool lock_client)
 {
@@ -1635,6 +1629,7 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	struct ion_client *client = filp->private_data;
 	struct ion_device *dev = client->dev;
 	struct ion_handle *cleanup_handle = NULL;
+	struct dma_buf *dmabuf = NULL;
 	int ret = 0;
 	unsigned int dir;
 
@@ -1697,11 +1692,18 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			mutex_unlock(&client->lock);
 			return PTR_ERR(handle);
 		}
-		data.fd.fd = ion_share_dma_buf_fd_nolock(client, handle);
+		dmabuf = __ion_share_dma_buf(client, handle, false);
 		ion_handle_put_nolock(handle);
 		mutex_unlock(&client->lock);
-		if (data.fd.fd < 0)
-			ret = data.fd.fd;
+		if (IS_ERR(dmabuf))
+			return PTR_ERR(dmabuf);
+
+		/* Publish the fd only after the result has been copied out. */
+		data.fd.fd = get_unused_fd_flags(O_CLOEXEC);
+		if (data.fd.fd < 0) {
+			dma_buf_put(dmabuf);
+			return data.fd.fd;
+		}
 		break;
 	}
 	case ION_IOC_IMPORT:
@@ -1718,10 +1720,15 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			if (IS_ERR(handle)) {
 				ret = PTR_ERR(handle);
 				data.handle.handle = 0;
+			} else if (copy_to_user((void __user *)arg, &data,
+						_IOC_SIZE(cmd))) {
+				/* Roll back under the client lock. */
+				user_ion_free_nolock(client, handle);
+				ret = -EFAULT;
 			}
 		}
 		mutex_unlock(&client->lock);
-		break;
+		return ret;
 	}
 	case ION_IOC_SYNC:
 	{
@@ -1751,6 +1758,10 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	if (dir & _IOC_READ) {
 		if (copy_to_user((void __user *)arg, &data, _IOC_SIZE(cmd))) {
+			if (dmabuf) {
+				put_unused_fd(data.fd.fd);
+				dma_buf_put(dmabuf);
+			}
 			if (cleanup_handle) {
 				mutex_lock(&client->lock);
 				user_ion_free_nolock(client, cleanup_handle);
@@ -1760,6 +1771,8 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		}
 	}
+	if (dmabuf)
+		fd_install(data.fd.fd, dmabuf->file);
 	if (cleanup_handle)
 		ion_handle_put(cleanup_handle);
 	return ret;

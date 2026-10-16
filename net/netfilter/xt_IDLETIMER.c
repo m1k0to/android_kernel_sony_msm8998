@@ -80,6 +80,10 @@ struct idletimer_tg {
 };
 
 static LIST_HEAD(idletimer_tg_list);
+/* Lock order: lifecycle_mutex, then list_mutex.
+ * Sysfs show takes only list_mutex.
+ */
+static DEFINE_MUTEX(lifecycle_mutex);
 static DEFINE_MUTEX(list_mutex);
 static DEFINE_SPINLOCK(timestamp_lock);
 
@@ -189,14 +193,17 @@ static ssize_t idletimer_tg_show(struct kobject *kobj, struct attribute *attr,
 				 char *buf)
 {
 	struct idletimer_tg *timer;
-	unsigned long expires = 0;
 	unsigned long now = jiffies;
+	unsigned long expires = now;
+	bool send_nl_msg = false;
 
 	mutex_lock(&list_mutex);
 
 	timer =	__idletimer_tg_find_by_label(attr->name);
-	if (timer)
+	if (timer) {
 		expires = timer->timer.expires;
+		send_nl_msg = timer->send_nl_msg;
+	}
 
 	mutex_unlock(&list_mutex);
 
@@ -204,7 +211,7 @@ static ssize_t idletimer_tg_show(struct kobject *kobj, struct attribute *attr,
 		return sprintf(buf, "%u\n",
 			       jiffies_to_msecs(expires - now) / 1000);
 
-	if (timer->send_nl_msg)
+	if (send_nl_msg)
 		return sprintf(buf, "0 %d\n",
 			jiffies_to_msecs(now - expires) / 1000);
 	else
@@ -322,16 +329,6 @@ static int idletimer_tg_create(struct idletimer_tg_info *info)
 	info->timer->attr.attr.mode = S_IRUGO;
 	info->timer->attr.show = idletimer_tg_show;
 
-	ret = sysfs_create_file(idletimer_tg_kobj, &info->timer->attr.attr);
-	if (ret < 0) {
-		pr_debug("couldn't add file to sysfs");
-		goto out_free_attr;
-	}
-	/* notify userspace */
-	kobject_uevent(idletimer_tg_kobj, KOBJ_ADD);
-
-	list_add(&info->timer->entry, &idletimer_tg_list);
-
 	setup_timer(&info->timer->timer, idletimer_tg_expired,
 		    (unsigned long) info->timer);
 	info->timer->refcnt = 1;
@@ -345,19 +342,32 @@ static int idletimer_tg_create(struct idletimer_tg_info *info)
 	info->timer->uid = 0;
 	get_monotonic_boottime(&info->timer->last_modified_timer);
 
+	INIT_WORK(&info->timer->work, idletimer_tg_work);
+
 	info->timer->pm_nb.notifier_call = idletimer_resume;
 	ret = register_pm_notifier(&info->timer->pm_nb);
 	if (ret)
-		printk(KERN_WARNING "[%s] Failed to register pm notifier %d\n",
-				__func__, ret);
+		goto out_free_attr;
 
-	INIT_WORK(&info->timer->work, idletimer_tg_work);
+	ret = sysfs_create_file(idletimer_tg_kobj, &info->timer->attr.attr);
+	if (ret < 0)
+		goto out_unregister;
 
+	mutex_lock(&list_mutex);
 	mod_timer(&info->timer->timer,
 		  msecs_to_jiffies(info->timeout * 1000) + jiffies);
 
+	list_add(&info->timer->entry, &idletimer_tg_list);
+	mutex_unlock(&list_mutex);
+	/* Notify only after the timer is fully published. */
+	kobject_uevent(idletimer_tg_kobj, KOBJ_ADD);
+
 	return 0;
 
+out_unregister:
+	unregister_pm_notifier(&info->timer->pm_nb);
+	del_timer_sync(&info->timer->timer);
+	cancel_work_sync(&info->timer->work);
 out_free_attr:
 	kfree(info->timer->attr.attr.name);
 out_free_timer:
@@ -432,7 +442,7 @@ static unsigned int idletimer_tg_target(struct sk_buff *skb,
 static int idletimer_tg_checkentry(const struct xt_tgchk_param *par)
 {
 	struct idletimer_tg_info *info = par->targinfo;
-	int ret;
+	int ret = 0;
 
 	pr_debug("checkentry targinfo %s\n", info->label);
 
@@ -451,6 +461,7 @@ static int idletimer_tg_checkentry(const struct xt_tgchk_param *par)
 		return -EINVAL;
 	}
 
+	mutex_lock(&lifecycle_mutex);
 	mutex_lock(&list_mutex);
 
 	info->timer = __idletimer_tg_find_by_label(info->label);
@@ -459,18 +470,14 @@ static int idletimer_tg_checkentry(const struct xt_tgchk_param *par)
 		reset_timer(info, NULL);
 		pr_debug("increased refcnt of timer %s to %u\n",
 			 info->label, info->timer->refcnt);
-	} else {
-		ret = idletimer_tg_create(info);
-		if (ret < 0) {
-			pr_debug("failed to create timer\n");
-			mutex_unlock(&list_mutex);
-			return ret;
-		}
 	}
-
 	mutex_unlock(&list_mutex);
 
-	return 0;
+	if (!info->timer)
+		ret = idletimer_tg_create(info);
+
+	mutex_unlock(&lifecycle_mutex);
+	return ret;
 }
 
 static void idletimer_tg_destroy(const struct xt_tgdtor_param *par)
@@ -479,24 +486,27 @@ static void idletimer_tg_destroy(const struct xt_tgdtor_param *par)
 
 	pr_debug("destroy targinfo %s\n", info->label);
 
+	mutex_lock(&lifecycle_mutex);
 	mutex_lock(&list_mutex);
 
 	if (--info->timer->refcnt == 0) {
 		pr_debug("deleting timer %s\n", info->label);
 
 		list_del(&info->timer->entry);
-		del_timer_sync(&info->timer->timer);
+		mutex_unlock(&list_mutex);
 		sysfs_remove_file(idletimer_tg_kobj, &info->timer->attr.attr);
 		unregister_pm_notifier(&info->timer->pm_nb);
+		del_timer_sync(&info->timer->timer);
 		cancel_work_sync(&info->timer->work);
 		kfree(info->timer->attr.attr.name);
 		kfree(info->timer);
 	} else {
 		pr_debug("decreased refcnt of timer %s to %u\n",
 		info->label, info->timer->refcnt);
+		mutex_unlock(&list_mutex);
 	}
 
-	mutex_unlock(&list_mutex);
+	mutex_unlock(&lifecycle_mutex);
 }
 
 static struct xt_target idletimer_tg __read_mostly = {

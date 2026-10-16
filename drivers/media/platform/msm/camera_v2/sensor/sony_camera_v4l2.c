@@ -1630,7 +1630,11 @@ static ssize_t sony_camera_info_write(struct device *ldev,
 	char sensor_name[CAPS_MAX_STR_LEN];
 	int id = 0;
 	uint16_t info_len = 0;
-	struct camera_write_info *info = (struct camera_write_info *)buf;
+	const struct camera_write_info *info =
+		(const struct camera_write_info *)buf;
+
+	if (count < sizeof(*info))
+		return -EINVAL;
 
 	memset(sensor_name, 0, sizeof(sensor_name));
 	for (id = 0; id < sensor_num; id++) {

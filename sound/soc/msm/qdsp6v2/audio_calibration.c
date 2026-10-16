@@ -156,6 +156,7 @@ int audio_cal_register(int num_cal_types,
 		if (callback_node == NULL) {
 			pr_err("%s: could not allocated callback_node!\n",
 				__func__);
+			kfree(client_info_node);
 			ret = -ENOMEM;
 			goto err;
 		}

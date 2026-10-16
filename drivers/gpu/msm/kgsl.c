@@ -2046,8 +2046,10 @@ static long gpuobj_free_on_fence(struct kgsl_device_private *dev_priv,
 		gpuobj_free_fence_func, entry);
 
 	/* if handle is NULL the fence has already signaled */
-	if (handle == NULL)
-		return gpumem_free_entry(entry);
+	if (!handle) {
+		kgsl_mem_entry_put(entry);
+		return 0;
+	}
 
 	if (IS_ERR(handle)) {
 		kgsl_mem_entry_unset_pend(entry);
