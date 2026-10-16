@@ -127,3 +127,11 @@ android/configs/android-*.cfg
 #Ignoring Android.bp link file
 #
 Android.bp
+
+# Local agent workspace documentation
+/AGENTS.md
+/CLAUDE.md
+/docs/paseo/
+
+# Local Paseo project settings
+/paseo.json
